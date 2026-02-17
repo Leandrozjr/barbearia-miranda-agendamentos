@@ -49,6 +49,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { getAppointments, cancelAppointment, clearAppointments, getUsers, updateUser, getBarbers, type AdminUser, createAppointment, completeAppointment, getServices, updateServicePrice, addService, deleteService, updateBarberSchedule, updateBarberServices } from "@/lib/storage";
 import { logger, type LogEntry } from "@/lib/logger";
 import { fetchSiteContent, updateSiteContent, fetchGallery, addGalleryItem, deleteGalleryItem, uploadGalleryImage, type SiteContent, type GalleryItem, defaultContent } from "@/lib/contentManager";
+
+// Supabase Auth (needed to write to DB/Storage when RLS uses `authenticated`)
 import type { Appointment, Service } from "@/types";
 import { HIDDEN_SERVICES } from "@/lib/data";
 import { FinancialDashboard } from "@/components/FinancialDashboard";
@@ -77,6 +79,11 @@ export default function AdminDashboard() {
   const [newImageUrl, setNewImageUrl] = useState("");
   const [newImageCaption, setNewImageCaption] = useState("");
   const [isUploading, setIsUploading] = useState(false);
+
+  // Supabase Auth State (required for saving content/upload when RLS uses `authenticated`)
+  const [sbEmail, setSbEmail] = useState("");
+  const [sbPassword, setSbPassword] = useState("");
+  const [sbAuthed, setSbAuthed] = useState(false);
 
   // Service Management State
   const [newServiceName, setNewServiceName] = useState("");
@@ -128,26 +135,29 @@ export default function AdminDashboard() {
 
   const handleGalleryFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      if (file.size > 2000000) { // Limit 2MB for gallery uploads
-        toast.error("Imagem muito grande (máx 2MB).");
-        return;
+    if (!file) return;
+
+    const ok = await requireSupabaseAuth();
+    if (!ok) return;
+
+    if (file.size > 2000000) { // Limit 2MB for gallery uploads
+      toast.error("Imagem muito grande (máx 2MB).");
+      return;
+    }
+
+    setIsUploading(true);
+    try {
+      const url = await uploadGalleryImage(file);
+      if (url) {
+        setNewImageUrl(url);
+        toast.success("Imagem enviada! Agora clique em 'Salvar na Galeria'.");
+      } else {
+        toast.error("Upload falhou. Confirme bucket 'gallery' + policies (Storage) no Supabase.");
       }
-      
-      setIsUploading(true);
-      try {
-        const url = await uploadGalleryImage(file);
-        if (url) {
-            setNewImageUrl(url);
-            toast.success("Imagem enviada! Clique em Adicionar para salvar.");
-        } else {
-            toast.error("Erro ao enviar imagem. Verifique se o bucket 'gallery' está configurado.");
-        }
-      } catch (err) {
-        toast.error("Falha no upload.");
-      } finally {
-        setIsUploading(false);
-      }
+    } catch (err: any) {
+      toast.error("Falha no upload: " + (err?.message || "Erro desconhecido"));
+    } finally {
+      setIsUploading(false);
     }
   };
 
@@ -218,38 +228,109 @@ export default function AdminDashboard() {
     }
   }, [isAuthenticated, currentUser]);
 
+  const refreshSupabaseSession = async () => {
+    try {
+      if (!supabase) {
+        setSbAuthed(false);
+        return;
+      }
+      const { data } = await supabase.auth.getSession();
+      setSbAuthed(!!data.session);
+    } catch {
+      setSbAuthed(false);
+    }
+  };
+
   const loadContent = async () => {
     if (currentUser?.isMaster) {
-        const content = await fetchSiteContent();
-        setSiteContent(content);
-        const galleryItems = await fetchGallery();
-        setGallery(galleryItems);
+      await refreshSupabaseSession();
+      const content = await fetchSiteContent();
+      setSiteContent(content);
+      const galleryItems = await fetchGallery();
+      setGallery(galleryItems);
+    }
+  };
+
+  const requireSupabaseAuth = async (): Promise<boolean> => {
+    if (!supabase) {
+      toast.error("Supabase não está configurado no site oficial.");
+      return false;
+    }
+
+    const { data } = await supabase.auth.getSession();
+    const authed = !!data.session;
+    setSbAuthed(authed);
+
+    if (!authed) {
+      toast.error("Conecte o Supabase (login) para salvar no site oficial.");
+      return false;
+    }
+
+    return true;
+  };
+
+  const handleSupabaseLogin = async () => {
+    if (!supabase) {
+      toast.error("Supabase não está configurado.");
+      return;
+    }
+    if (!sbEmail || !sbPassword) {
+      toast.error("Preencha email e senha do Supabase.");
+      return;
+    }
+
+    const { error } = await supabase.auth.signInWithPassword({ email: sbEmail, password: sbPassword });
+    if (error) {
+      toast.error("Login Supabase falhou: " + error.message);
+      setSbAuthed(false);
+      return;
+    }
+
+    toast.success("Supabase conectado! Agora você pode salvar e enviar fotos.");
+    await refreshSupabaseSession();
+  };
+
+  const handleSupabaseLogout = async () => {
+    try {
+      if (!supabase) return;
+      await supabase.auth.signOut();
+      setSbAuthed(false);
+      toast.success("Supabase desconectado.");
+    } catch {
+      // ignore
     }
   };
 
   const handleSaveContent = async () => {
+    const ok = await requireSupabaseAuth();
+    if (!ok) return;
+
     const res = await updateSiteContent(siteContent);
     if (res.success) {
-        toast.success("Conteúdo do site atualizado!");
+      toast.success("Conteúdo do site atualizado!");
     } else {
-        toast.error("Erro ao salvar: " + res.error);
+      toast.error("Erro ao salvar: " + res.error);
     }
   };
 
   const handleAddGalleryImage = async () => {
+    const ok = await requireSupabaseAuth();
+    if (!ok) return;
+
     if (!newImageUrl) {
-        toast.error("Insira a URL da imagem");
-        return;
+      toast.error("Insira a URL da imagem");
+      return;
     }
+
     const success = await addGalleryItem(newImageUrl, newImageCaption);
     if (success) {
-        setNewImageUrl("");
-        setNewImageCaption("");
-        const items = await fetchGallery();
-        setGallery(items);
-        toast.success("Imagem adicionada!");
+      setNewImageUrl("");
+      setNewImageCaption("");
+      const items = await fetchGallery();
+      setGallery(items);
+      toast.success("Imagem adicionada!");
     } else {
-        toast.error("Erro ao adicionar imagem.");
+      toast.error("Erro ao adicionar imagem.");
     }
   };
 
@@ -513,13 +594,18 @@ export default function AdminDashboard() {
 
   const handleUpdateSchedule = async () => {
     if (!editingScheduleBarberId || !scheduleOpenTime || !scheduleCloseTime) {
-        toast.error("Preencha todos os campos");
-        return;
+      toast.error("Preencha todos os campos");
+      return;
     }
-    await updateBarberSchedule(editingScheduleBarberId, scheduleOpenTime, scheduleCloseTime);
-    toast.success("Horário atualizado com sucesso!");
-    const updatedBarbers = await getBarbers();
-    setBarbers(updatedBarbers);
+
+    try {
+      await updateBarberSchedule(editingScheduleBarberId, scheduleOpenTime, scheduleCloseTime);
+      toast.success("Horário atualizado com sucesso!");
+      const updatedBarbers = await getBarbers();
+      setBarbers(updatedBarbers);
+    } catch (err: any) {
+      toast.error("Não foi possível salvar no Supabase: " + (err?.message || "Erro desconhecido"));
+    }
   };
 
   const loadLogs = async () => {
@@ -1351,6 +1437,49 @@ export default function AdminDashboard() {
 
           {/* SITE CONTENT TAB */}
           <TabsContent value="content" className="pb-40 space-y-8">
+            <Card className="border-2 border-purple-200">
+              <CardHeader>
+                <CardTitle>Conexão Supabase (Salvar no Site Oficial)</CardTitle>
+                <CardDescription>
+                  Para salvar textos, horários e enviar fotos, o painel precisa estar autenticado no Supabase.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex items-center justify-between gap-4">
+                  <Badge variant="outline" className={sbAuthed ? "bg-green-50 text-green-700 border-green-200" : "bg-amber-50 text-amber-700 border-amber-200"}>
+                    {sbAuthed ? "Supabase: Conectado" : "Supabase: Desconectado"}
+                  </Badge>
+                  <div className="flex gap-2">
+                    <Button type="button" variant="outline" size="sm" onClick={refreshSupabaseSession}>
+                      <RefreshCw className="w-4 h-4 mr-2" /> Verificar
+                    </Button>
+                    <Button type="button" variant="destructive" size="sm" onClick={handleSupabaseLogout} disabled={!sbAuthed}>
+                      <LogOut className="w-4 h-4 mr-2" /> Desconectar
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>Email do Supabase</Label>
+                    <Input value={sbEmail} onChange={(e) => setSbEmail(e.target.value)} placeholder="seuemail@dominio.com" />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Senha do Supabase</Label>
+                    <Input type="password" value={sbPassword} onChange={(e) => setSbPassword(e.target.value)} placeholder="********" />
+                  </div>
+                </div>
+
+                <Button type="button" onClick={handleSupabaseLogin} className="w-full" disabled={sbAuthed}>
+                  <Lock className="w-4 h-4 mr-2" /> Conectar Supabase
+                </Button>
+
+                <p className="text-xs text-muted-foreground">
+                  Dica: crie um usuário no Supabase Auth (Email/Senha) para o Gerente e use aqui.
+                </p>
+              </CardContent>
+            </Card>
+
             <Card>
               <CardHeader>
                 <CardTitle>Editar Conteúdo do Site</CardTitle>

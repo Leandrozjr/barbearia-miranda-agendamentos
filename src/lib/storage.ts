@@ -121,21 +121,25 @@ export const deleteService = async (id: string) => {
 };
 
 export const updateBarberSchedule = async (id: string, openTime: string, closeTime: string) => {
+  // If Supabase is configured, ONLY confirm success if DB update succeeds.
   if (isSupabaseConfigured() && supabase) {
-    await supabase.from('barbers').update({ openTime, closeTime }).eq('id', id);
+    const { error } = await supabase.from('barbers').update({ openTime, closeTime }).eq('id', id);
+    if (error) throw error;
   }
-  
-  const barbers = await getBarbers();
+
+  // Local override (also used as a resilient cache)
+  const barbers = getStoredData<Barber[]>(STORAGE_KEY_BARBERS) || (await getBarbers());
   const updated = barbers.map(b => b.id === id ? { ...b, openTime, closeTime } : b);
   saveData(STORAGE_KEY_BARBERS, updated);
 };
 
 export const updateBarberServices = async (barberId: string, serviceIds: string[]) => {
   if (isSupabaseConfigured() && supabase) {
-    await supabase.from('barbers').update({ serviceIds }).eq('id', barberId);
+    const { error } = await supabase.from('barbers').update({ serviceIds }).eq('id', barberId);
+    if (error) throw error;
   }
-  
-  const barbers = await getBarbers();
+
+  const barbers = getStoredData<Barber[]>(STORAGE_KEY_BARBERS) || (await getBarbers());
   const updated = barbers.map(b => b.id === barberId ? { ...b, serviceIds } : b);
   saveData(STORAGE_KEY_BARBERS, updated);
 };
@@ -184,39 +188,33 @@ export const updateUser = async (updatedUser: AdminUser) => {
 
 export const getBarbers = async (): Promise<Barber[]> => {
   await initializeData();
-  
-  let barbers: Barber[] = [];
 
+  const localBarbers = getStoredData<Barber[]>(STORAGE_KEY_BARBERS) || BARBERS;
+
+  let barbers: Barber[] = localBarbers;
+
+  // If Supabase is available, try DB first; if it fails, fallback to local.
   if (isSupabaseConfigured() && supabase) {
     const { data, error } = await supabase.from('barbers').select('*');
-    if (!error && data) {
+    if (!error && data && data.length > 0) {
       barbers = data as Barber[];
     }
-  } else {
-    barbers = getStoredData<Barber[]>(STORAGE_KEY_BARBERS) || BARBERS;
   }
 
-  // HYBRID SYNC:
-  // 1. serviceIds and phone: Strict from code (data.ts) for now, unless we fully migrate to DB
-  // 2. openTime/closeTime: Prefer DB/Storage value if user edited it, otherwise fallback to code
-  
-  return barbers.map(b => {
-    const freshConfig = BARBERS.find(fb => fb.id === b.id);
-    if (freshConfig) {
-      return {
-        ...b,
-        serviceIds: freshConfig.serviceIds, // Strict
-        phone: freshConfig.phone, // Strict
-        // If 'b' (stored) has openTime, keep it. If not, use freshConfig (code).
-        // This allows user edits to persist.
-        openTime: b.openTime || freshConfig.openTime, 
-        closeTime: b.closeTime || freshConfig.closeTime 
-      };
-    }
+  // HYBRID SYNC (resilient):
+  // - phone + serviceIds: always from code (data.ts)
+  // - openTime/closeTime: prefer LOCAL override if exists (admin just edited),
+  //   otherwise use DB value, otherwise fallback to code.
+  return barbers.map((b) => {
+    const freshConfig = BARBERS.find((fb) => fb.id === b.id);
+    const localOverride = localBarbers.find((lb) => lb.id === b.id);
+
     return {
-        ...b,
-        serviceIds: b.serviceIds || [],
-        phone: b.phone || ""
+      ...b,
+      serviceIds: freshConfig?.serviceIds || b.serviceIds || [],
+      phone: freshConfig?.phone || b.phone || "",
+      openTime: localOverride?.openTime || b.openTime || freshConfig?.openTime,
+      closeTime: localOverride?.closeTime || b.closeTime || freshConfig?.closeTime,
     };
   });
 };
