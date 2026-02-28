@@ -1,17 +1,16 @@
 // src/lib/supabaseClient.ts
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-import { createClient } from '@supabase/supabase-js'
+const supabaseUrl = (import.meta.env.VITE_SUPABASE_URL as string | undefined) ?? "";
+const supabaseAnonKey =
+  (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined) ?? "";
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
+// vira FUNÇÃO (pra poder usar isSupabaseConfigured())
+export const isSupabaseConfigured = () => {
+  return Boolean(supabaseUrl && supabaseAnonKey);
+};
 
-export const isSupabaseConfigured =
-  !!supabaseUrl &&
-  !!supabaseAnonKey &&
-  supabaseUrl !== '' &&
-  supabaseAnonKey !== ''
-
-export const supabase = createClient(
-  supabaseUrl,
-  supabaseAnonKey
-)
+// supabase pode ser null se não estiver configurado
+export const supabase: SupabaseClient | null = isSupabaseConfigured()
+  ? createClient(supabaseUrl, supabaseAnonKey)
+  : null;
